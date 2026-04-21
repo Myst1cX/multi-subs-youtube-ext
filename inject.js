@@ -5,6 +5,41 @@ const YT_PANEL_ID = 'yt-multi-subs-panel';
 // Set of langIds with active subtitle tracks
 const activeTracks = new Set();
 
+// ── Timedtext fetch interceptor ──────────────────────────────────────────────
+// YouTube's timedtext API requires a POT (Proof of Origin Token) that only
+// YouTube's player can generate — without it all formats return an empty body.
+// Running in MAIN world lets us monkey-patch window.fetch to:
+//   1. Cache every response body by language code (so we can reuse it directly).
+//   2. Extract the pot= value for use when fetching languages the player hasn't
+//      requested yet (pot is per-session/video, not per-language).
+const timedtextCache = {};   // { [langCode]: string } raw json3 response text
+let timedtextPot = null;     // pot= token extracted from the last intercepted URL
+
+(function interceptTimedtextFetch() {
+  const origFetch = window.fetch;
+  window.fetch = async function (...args) {
+    const url = typeof args[0] === 'string' ? args[0] : (args[0]?.url ?? '');
+    const response = await origFetch.apply(this, args);
+    if (url.includes('/api/timedtext')) {
+      try {
+        const params = new URL(url).searchParams;
+        const lang = params.get('lang');
+        const pot  = params.get('pot');
+        if (pot) timedtextPot = pot;
+        if (lang) {
+          response.clone().text().then(body => {
+            if (body) {
+              timedtextCache[lang] = body;
+              console.log(`[Multi-Subs] Intercepted timedtext lang="${lang}" | ${body.length} chars | pot=${!!pot}`);
+            }
+          }).catch(() => {});
+        }
+      } catch (_) {}
+    }
+    return response;
+  };
+})();
+
 // ── Styles ──────────────────────────────────────────────────────────────────
 (function injectStyles() {
   const style = document.createElement('style');
@@ -139,24 +174,41 @@ async function toggleSubtitle(id, baseUrl, label, isChecked) {
   }
 
   try {
-    // Use fmt=json3 – YouTube's own player format, works without a POT token.
-    // fmt=vtt silently returns an empty body without the player-generated POT.
-    const url = new URL(baseUrl);
-    url.searchParams.set('fmt', 'json3');
+    // The bare language code (strip -auto suffix used internally)
+    const langCode = id.replace(/-auto$/, '');
 
-    const fetchUrl = url.toString();
-    console.log(`[Multi-Subs] Fetching json3 from: ${fetchUrl}`);
+    let json3;
 
-    const response = await fetch(fetchUrl);
-    console.log(`[Multi-Subs] Fetch response | status=${response.status} ok=${response.ok}`);
+    // 1. Use a response the player already fetched (pot not needed)
+    if (timedtextCache[langCode]) {
+      console.log(`[Multi-Subs] Using intercepted cache for lang="${langCode}"`);
+      json3 = JSON.parse(timedtextCache[langCode]);
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status} ${response.statusText}`);
+    } else {
+      // 2. Fetch via baseUrl (from ytInitialPlayerResponse captionTracks).
+      //    The signature covers only sparams (ip, expire, v, …) and does NOT
+      //    cover lang/pot/fmt, so we can freely append them.
+      //    Append pot= if we captured one from the player – without it the
+      //    server silently returns an empty body for both fmt=vtt and fmt=json3.
+      const url = new URL(baseUrl);
+      url.searchParams.set('fmt', 'json3');
+      if (timedtextPot) {
+        url.searchParams.set('pot', timedtextPot);
+        url.searchParams.set('potc', '1'); // potc=1 signals the server that a POT is present
+        console.log(`[Multi-Subs] Fetching json3 with pot for lang="${langCode}"`);
+      } else {
+        console.log(`[Multi-Subs] Fetching json3 without pot for lang="${langCode}" (may be empty)`);
+      }
+
+      const response = await fetch(url.toString());
+      console.log(`[Multi-Subs] Fetch response | status=${response.status} ok=${response.ok}`);
+      if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText}`);
+
+      json3 = await response.json();
     }
 
-    const json3 = await response.json();
     const eventCount = (json3.events || []).length;
-    console.log(`[Multi-Subs] json3 received | events=${eventCount}`);
+    console.log(`[Multi-Subs] json3 parsed | events=${eventCount}`);
 
     const vttText = json3ToVtt(json3);
     console.log(`[Multi-Subs] Converted to VTT | length=${vttText.length} chars`);
@@ -239,6 +291,9 @@ function startPolling() {
 window.addEventListener('yt-navigate-finish', () => {
   console.log('[Multi-Subs] yt-navigate-finish – resetting state.');
   activeTracks.clear();
+  // Clear per-video timedtext state; pot and cache are invalid after navigation
+  timedtextPot = null;
+  for (const key of Object.keys(timedtextCache)) delete timedtextCache[key];
   // Remove the injected panel so initUI can re-create it for the new page
   document.getElementById(YT_PANEL_ID)?.remove();
   startPolling();
