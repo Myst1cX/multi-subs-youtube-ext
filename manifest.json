@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "Multi-Subtitles for YouTube",
+  "version": "1.0.0",
+  "description": "Display multiple subtitle tracks simultaneously on YouTube.",
+  "permissions": [
+    "storage",
+    "scripting",
+    "activeTab"
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Multi-Subtitles for YouTube"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["stor.js", "inject.js"],
+      "run_at": "document_idle"
+    }
+  ]
+}
