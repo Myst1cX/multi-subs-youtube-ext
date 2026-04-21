@@ -22,8 +22,14 @@
   "content_scripts": [
     {
       "matches": ["https://www.youtube.com/*"],
-      "js": ["stor.js", "inject.js"],
+      "js": ["stor.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_idle",
+      "world": "MAIN"
     }
   ]
 }

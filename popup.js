@@ -18,11 +18,21 @@ async function getActiveYouTubeTab() {
 async function queryTracks(tabId) {
   const results = await api.scripting.executeScript({
     target: { tabId },
+    world: 'MAIN',
     func: () => {
+      // Gary's way: read ytInitialPlayerResponse first (MAIN world required)
+      const ipr = window.ytInitialPlayerResponse;
+      const iprTracks = ipr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (iprTracks?.length) return iprTracks;
+
+      // Fallback: ytplayer.config (updated after SPA navigation)
+      const raw = window.ytplayer?.config?.args?.raw_player_response;
+      const rawTracks = raw?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (rawTracks?.length) return rawTracks;
+
+      // Last resort: DOM player API
       const player = document.getElementById('movie_player');
-      if (!player) return null;
-      const resp = player.getPlayerResponse?.();
-      return resp?.captions?.playerCaptionsTracklistRenderer?.captionTracks || null;
+      return player?.getPlayerResponse?.()?.captions?.playerCaptionsTracklistRenderer?.captionTracks || null;
     }
   });
   return results?.[0]?.result ?? null;
@@ -46,8 +56,9 @@ async function getActiveTrackIds(tabId) {
 async function toggleTrackInPage(tabId, id, baseUrl, label, checked) {
   await api.scripting.executeScript({
     target: { tabId },
+    world: 'MAIN',
     func: (langId, url, lbl, isChecked) => {
-      // Dispatch a custom event that inject.js listens to
+      // Dispatch a custom event that inject.js listens to (both run in MAIN world)
       window.dispatchEvent(new CustomEvent('yt-multi-subs-toggle', {
         detail: { id: langId, baseUrl: url, label: lbl, checked: isChecked }
       }));
@@ -97,7 +108,7 @@ async function init() {
     cb.checked = activeIds.includes(id);
     cb.onchange = async (e) => {
       try {
-        await toggleTrackInPage(tab.id, id, t.baseUrl, t.name?.simpleText || t.languageCode, e.target.checked);
+        await toggleTrackInPage(tab.id, id, t.baseUrl, displayName, e.target.checked);
       } catch (err) {
         console.error('[Multi-Subs popup] Failed to toggle track:', err);
         // Revert the checkbox to its previous state on failure

@@ -1,6 +1,5 @@
 // inject.js - Core injection, VTT cleanup, debug logging, SPA navigation support
-// Cross-browser API fallback
-const api = (typeof browser !== 'undefined' && browser.runtime) ? browser : chrome;
+// Runs in MAIN world (see manifest.json) so YouTube page-level globals are accessible.
 
 const YT_PANEL_ID = 'yt-multi-subs-panel';
 // Map of langId -> blob URL for active subtitle tracks
@@ -58,19 +57,48 @@ const activeBlobUrls = new Map();
   document.head.appendChild(style);
 })();
 
-// ── POT token helper ─────────────────────────────────────────────────────────
+// ── Caption track discovery (Gary's way) ────────────────────────────────────
+// Running in MAIN world gives us direct access to YouTube's page-level globals.
+// Priority: ytInitialPlayerResponse → ytplayer.config → DOM getPlayerResponse()
+function getCaptionTracks() {
+  // 1. ytInitialPlayerResponse – always present on page load, most reliable
+  const ipr = window.ytInitialPlayerResponse;
+  const iprTracks = ipr?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (iprTracks?.length) {
+    console.log(`[Multi-Subs] getCaptionTracks via ytInitialPlayerResponse: ${iprTracks.length} track(s)`);
+    return iprTracks;
+  }
+
+  // 2. ytplayer.config – updated after SPA navigation
+  const raw = window.ytplayer?.config?.args?.raw_player_response;
+  const rawTracks = raw?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (rawTracks?.length) {
+    console.log(`[Multi-Subs] getCaptionTracks via ytplayer.config: ${rawTracks.length} track(s)`);
+    return rawTracks;
+  }
+
+  // 3. DOM player API – last resort
+  const player = document.getElementById('movie_player');
+  const domTracks = player?.getPlayerResponse?.()?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+  if (domTracks?.length) {
+    console.log(`[Multi-Subs] getCaptionTracks via getPlayerResponse(): ${domTracks.length} track(s)`);
+    return domTracks;
+  }
+
+  console.log('[Multi-Subs] getCaptionTracks: no tracks found from any source.');
+  return [];
+}
+
+
 function getPotToken() {
   try {
-    const tracks =
-      window.ytplayer?.config?.args?.raw_player_response
-        ?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if (tracks) {
-      for (const t of tracks) {
-        const match = t.baseUrl.match(/pot=([^&]+)/);
-        if (match) {
-          console.log('[Multi-Subs] POT token found:', match[1].slice(0, 12) + '…');
-          return match[1];
-        }
+    // Use getCaptionTracks() which already reads from the best available source
+    const tracks = getCaptionTracks();
+    for (const t of tracks) {
+      const match = t.baseUrl.match(/pot=([^&]+)/);
+      if (match) {
+        console.log('[Multi-Subs] POT token found:', match[1].slice(0, 12) + '…');
+        return match[1];
       }
     }
   } catch (e) {
@@ -184,12 +212,7 @@ function initUI() {
   if (!subBtn) return;
   if (document.getElementById(YT_PANEL_ID)) return;
 
-  const tracks =
-    document.getElementById('movie_player')
-      ?.getPlayerResponse()
-      ?.captions
-      ?.playerCaptionsTracklistRenderer
-      ?.captionTracks || [];
+  const tracks = getCaptionTracks();
 
   console.log(`[Multi-Subs] initUI | found ${tracks.length} caption track(s)`);
 
