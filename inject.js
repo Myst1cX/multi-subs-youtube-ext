@@ -89,6 +89,31 @@ function getCaptionTracks() {
   return [];
 }
 
+// ── json3 → VTT conversion ───────────────────────────────────────────────────
+// YouTube's timedtext API returns fmt=vtt as an empty body unless the request
+// includes a POT (Proof of Origin Token) that only the player can generate.
+// fmt=json3 works without a POT, so we fetch json3 and convert it to VTT here.
+function msToVttTime(ms) {
+  const h = Math.floor(ms / 3600000);
+  const m = Math.floor((ms % 3600000) / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  const ms3 = ms % 1000;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}.${String(ms3).padStart(3, '0')}`;
+}
+
+function json3ToVtt(json3) {
+  const lines = ['WEBVTT', ''];
+  for (const event of (json3.events || [])) {
+    if (!event.segs || !event.dDurationMs) continue;
+    const text = event.segs.map(s => s.utf8 || '').join('').trim();
+    if (!text) continue;
+    const start = msToVttTime(event.tStartMs || 0);
+    const end = msToVttTime((event.tStartMs || 0) + event.dDurationMs);
+    lines.push(`${start} --> ${end}`, text, '');
+  }
+  return lines.join('\n');
+}
+
 // ── Subtitle toggle ──────────────────────────────────────────────────────────
 async function toggleSubtitle(id, baseUrl, label, isChecked) {
   console.log(`[Multi-Subs] toggleSubtitle called | id="${id}" label="${label}" checked=${isChecked}`);
@@ -114,11 +139,13 @@ async function toggleSubtitle(id, baseUrl, label, isChecked) {
   }
 
   try {
+    // Use fmt=json3 – YouTube's own player format, works without a POT token.
+    // fmt=vtt silently returns an empty body without the player-generated POT.
     const url = new URL(baseUrl);
-    url.searchParams.set('fmt', 'vtt');
+    url.searchParams.set('fmt', 'json3');
 
     const fetchUrl = url.toString();
-    console.log(`[Multi-Subs] Fetching VTT from: ${fetchUrl}`);
+    console.log(`[Multi-Subs] Fetching json3 from: ${fetchUrl}`);
 
     const response = await fetch(fetchUrl);
     console.log(`[Multi-Subs] Fetch response | status=${response.status} ok=${response.ok}`);
@@ -127,15 +154,14 @@ async function toggleSubtitle(id, baseUrl, label, isChecked) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`);
     }
 
-    let vttText = await response.text();
-    console.log(`[Multi-Subs] VTT received | length=${vttText.length} chars`);
+    const json3 = await response.json();
+    const eventCount = (json3.events || []).length;
+    console.log(`[Multi-Subs] json3 received | events=${eventCount}`);
 
-    // Strip YouTube's left-aligned positioning cues so subtitles render at
-    // bottom-center instead of overlapping at the top-left corner. (Gary's fix)
-    vttText = vttText.replaceAll('align:start position:0%', '');
+    const vttText = json3ToVtt(json3);
+    console.log(`[Multi-Subs] Converted to VTT | length=${vttText.length} chars`);
 
-    // Use a data URI – self-contained and works in any extension context
-    // without the cross-origin restrictions that blob: URLs can trigger.
+    // Use a data URI – self-contained, no origin/CORS issues (Gary's way).
     const dataUri = 'data:text/vtt,' + encodeURIComponent(vttText);
 
     const track = document.createElement('track');
