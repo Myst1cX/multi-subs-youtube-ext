@@ -2,8 +2,8 @@
 // Runs in MAIN world (see manifest.json) so YouTube page-level globals are accessible.
 
 const YT_PANEL_ID = 'yt-multi-subs-panel';
-// Map of langId -> blob URL for active subtitle tracks
-const activeBlobUrls = new Map();
+// Set of langIds with active subtitle tracks
+const activeTracks = new Set();
 
 // ── Styles ──────────────────────────────────────────────────────────────────
 (function injectStyles() {
@@ -89,32 +89,13 @@ function getCaptionTracks() {
   return [];
 }
 
-
-function getPotToken() {
-  try {
-    // Use getCaptionTracks() which already reads from the best available source
-    const tracks = getCaptionTracks();
-    for (const t of tracks) {
-      const match = t.baseUrl.match(/pot=([^&]+)/);
-      if (match) {
-        console.log('[Multi-Subs] POT token found:', match[1].slice(0, 12) + '…');
-        return match[1];
-      }
-    }
-  } catch (e) {
-    console.warn('[Multi-Subs] Could not extract POT token:', e);
-  }
-  console.log('[Multi-Subs] No POT token found – continuing without it.');
-  return '';
-}
-
 // ── Subtitle toggle ──────────────────────────────────────────────────────────
 async function toggleSubtitle(id, baseUrl, label, isChecked) {
   console.log(`[Multi-Subs] toggleSubtitle called | id="${id}" label="${label}" checked=${isChecked}`);
 
-  const video = document.querySelector('#movie_player video');
+  const video = document.querySelector('video');
   if (!video) {
-    console.error('[Multi-Subs] <video> element not found inside #movie_player');
+    console.error('[Multi-Subs] <video> element not found');
     return;
   }
 
@@ -124,11 +105,7 @@ async function toggleSubtitle(id, baseUrl, label, isChecked) {
     console.log(`[Multi-Subs] Removing existing track for id="${id}"`);
     existing.track.mode = 'disabled';
     existing.remove();
-    if (activeBlobUrls.has(id)) {
-      URL.revokeObjectURL(activeBlobUrls.get(id));
-      activeBlobUrls.delete(id);
-      console.log(`[Multi-Subs] Revoked blob URL for id="${id}"`);
-    }
+    activeTracks.delete(id);
   }
 
   if (!isChecked) {
@@ -137,22 +114,14 @@ async function toggleSubtitle(id, baseUrl, label, isChecked) {
   }
 
   try {
-    const pot = getPotToken();
     const url = new URL(baseUrl);
     url.searchParams.set('fmt', 'vtt');
-    url.searchParams.set('c', 'WEB');
-    if (pot) url.searchParams.set('pot', pot);
 
     const fetchUrl = url.toString();
     console.log(`[Multi-Subs] Fetching VTT from: ${fetchUrl}`);
 
-    const response = await fetch(fetchUrl, {
-      method: 'GET',
-      credentials: 'omit',
-      referrerPolicy: 'no-referrer-when-downgrade'
-    });
-
-    console.log(`[Multi-Subs] Fetch response | status=${response.status} ok=${response.ok} type=${response.type}`);
+    const response = await fetch(fetchUrl);
+    console.log(`[Multi-Subs] Fetch response | status=${response.status} ok=${response.ok}`);
 
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`);
@@ -160,46 +129,27 @@ async function toggleSubtitle(id, baseUrl, label, isChecked) {
 
     let vttText = await response.text();
     console.log(`[Multi-Subs] VTT received | length=${vttText.length} chars`);
-    console.log('[Multi-Subs] VTT preview (first 300 chars):', vttText.slice(0, 300));
 
-    // Critical fix: YouTube embeds "align:start position:0%" in its VTT files as
-    // metadata cues, which causes subtitles to render overlapping each other at the
-    // top-left corner. Removing these directives restores normal bottom-center
-    // positioning. See: https://github.com/garywill/multi-subs-yt for the original fix.
-    const beforeLen = vttText.length;
+    // Strip YouTube's left-aligned positioning cues so subtitles render at
+    // bottom-center instead of overlapping at the top-left corner. (Gary's fix)
     vttText = vttText.replaceAll('align:start position:0%', '');
-    const afterLen = vttText.length;
-    if (beforeLen !== afterLen) {
-      console.log(`[Multi-Subs] VTT alignment fix applied | removed ${beforeLen - afterLen} chars`);
-    }
 
-    const blob = new Blob([vttText], { type: 'text/vtt' });
-    const blobUrl = URL.createObjectURL(blob);
-    activeBlobUrls.set(id, blobUrl);
-    console.log(`[Multi-Subs] Blob URL created for id="${id}": ${blobUrl}`);
+    // Use a data URI – self-contained and works in any extension context
+    // without the cross-origin restrictions that blob: URLs can trigger.
+    const dataUri = 'data:text/vtt,' + encodeURIComponent(vttText);
 
     const track = document.createElement('track');
     track.id = `yt-multi-track-${id}`;
     track.kind = 'captions';
     track.label = label;
     track.srclang = id;
-    track.src = blobUrl;
-    // Do not set default=true; we control visibility explicitly via track.mode below.
+    track.default = true;
+    track.src = dataUri;
 
     video.appendChild(track);
     track.track.mode = 'showing';
+    activeTracks.add(id);
     console.log(`[Multi-Subs] <track> appended | id="${id}" mode=${track.track.mode}`);
-
-    // Ensure all matching tracks in the TextTrackList are visible
-    let forcedCount = 0;
-    for (let i = 0; i < video.textTracks.length; i++) {
-      if (video.textTracks[i].label === label) {
-        video.textTracks[i].mode = 'showing';
-        forcedCount++;
-      }
-    }
-    console.log(`[Multi-Subs] textTracks forced to "showing" for label="${label}": ${forcedCount} track(s)`);
-    console.log(`[Multi-Subs] Total textTracks on <video>: ${video.textTracks.length}`);
 
   } catch (e) {
     console.error(`[Multi-Subs] Error loading subtitle "${id}":`, e);
@@ -262,12 +212,7 @@ function startPolling() {
 // ── SPA navigation (YouTube is a SPA) ────────────────────────────────────────
 window.addEventListener('yt-navigate-finish', () => {
   console.log('[Multi-Subs] yt-navigate-finish – resetting state.');
-  // Revoke all blob URLs to free memory
-  activeBlobUrls.forEach((url, id) => {
-    URL.revokeObjectURL(url);
-    console.log(`[Multi-Subs] Revoked blob URL for id="${id}" on navigation.`);
-  });
-  activeBlobUrls.clear();
+  activeTracks.clear();
   // Remove the injected panel so initUI can re-create it for the new page
   document.getElementById(YT_PANEL_ID)?.remove();
   startPolling();
